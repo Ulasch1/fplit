@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import healthRouter from './routes/health';
+import authRouter from './routes/auth';
+import meRouter from './routes/me';
 
 const app = express();
 
@@ -19,5 +21,11 @@ if (corsOrigins) {
 
 // Health check endpoint
 app.use(healthRouter);
+
+// Auth routes: POST /auth/register and POST /auth/login
+app.use('/auth', authRouter);
+
+// Temporary protected test endpoint: GET /me
+app.use(meRouter);
 
 export default app;

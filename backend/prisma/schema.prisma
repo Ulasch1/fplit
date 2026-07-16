@@ -1,5 +1,4 @@
-// This is the Prisma schema for Fplit. Models (User, Group, Expense, etc.)
-// are added per milestone, starting from M2.
+// Fplit schema – M2+ models (User added; Groups, Expenses etc. come later)
 
 generator client {
   provider = "prisma-client-js"
@@ -10,10 +9,12 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Temporary placeholder model – exists ONLY to allow `prisma generate` to produce
-// a client for the M1 skeleton. This model is NOT migrated (no table is created)
-// and will be replaced by the real domain models starting in M2. The /health
-// endpoint uses a raw `SELECT 1` query and does not read or write this model.
-model HealthCheck {
-  id Int @id @default(autoincrement())
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  name         String
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("users")
 }

@@ -16,5 +16,38 @@ model User {
   name         String
   createdAt    DateTime @default(now()) @map("created_at")
 
+  ownedGroups Group[]        @relation("GroupOwner")
+  memberships GroupMember[]
+
   @@map("users")
+}
+
+enum GroupStatus {
+  ACTIVE
+  CLOSED
+}
+
+model Group {
+  id        String      @id @default(uuid())
+  name      String
+  ownerId   String      @map("owner_id")
+  status    GroupStatus @default(ACTIVE)
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  owner   User          @relation("GroupOwner", fields: [ownerId], references: [id])
+  members GroupMember[]
+
+  @@map("groups")
+}
+
+model GroupMember {
+  groupId  String   @map("group_id")
+  userId   String   @map("user_id")
+  joinedAt DateTime @default(now()) @map("joined_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id])
+
+  @@id([groupId, userId])
+  @@map("group_members")
 }

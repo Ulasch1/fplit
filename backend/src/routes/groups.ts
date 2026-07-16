@@ -1,25 +1,11 @@
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
 import { requireAuth } from '../middleware/auth';
 import { prisma } from '../db';
+import { getActivationWindowMs } from '../lib/inviteConfig';
+import { formatGroup } from '../lib/formatGroup';
 
 const router = Router();
-
-// Helper: map internal group fields to snake_case JSON
-function formatGroup(group: {
-  id: string;
-  name: string;
-  ownerId: string;
-  status: string;
-  createdAt: Date;
-}) {
-  return {
-    id: group.id,
-    name: group.name,
-    owner_id: group.ownerId,
-    status: group.status,
-    created_at: group.createdAt,
-  };
-}
 
 // POST /groups
 router.post('/', requireAuth, async (req: Request, res: Response) => {
@@ -191,6 +177,53 @@ router.patch('/:id/owner', requireAuth, async (req: Request, res: Response) => {
     res.status(200).json(formatGroup(updatedGroup));
   } catch (error) {
     console.error('PATCH /groups/:id/owner error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /groups/:id/invite-link
+router.post('/:id/invite-link', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const group = await prisma.group.findUnique({ where: { id: req.params.id } });
+    if (!group) {
+      res.status(404).json({ error: 'Group not found' });
+      return;
+    }
+    if (group.ownerId !== req.userId) {
+      res.status(403).json({ error: 'Only the group owner can generate an invite link' });
+      return;
+    }
+    if (group.status === 'CLOSED') {
+      res.status(400).json({ error: 'Cannot generate an invite link for a closed group' });
+      return;
+    }
+
+    const token = crypto.randomBytes(24).toString('hex');
+
+    const newLink = await prisma.$transaction(async (tx) => {
+      // Invalidate all existing non-EXPIRED links for this group
+      await tx.inviteLink.updateMany({
+        where: { groupId: group.id, status: { not: 'EXPIRED' } },
+        data: { status: 'EXPIRED' },
+      });
+
+      return tx.inviteLink.create({
+        data: {
+          groupId: group.id,
+          token,
+        },
+      });
+    });
+
+    const expiresAt = new Date(newLink.createdAt.getTime() + getActivationWindowMs());
+
+    res.status(201).json({
+      token: newLink.token,
+      status: 'PENDING',
+      expires_at: expiresAt.toISOString(),
+    });
+  } catch (error) {
+    console.error('POST /groups/:id/invite-link error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

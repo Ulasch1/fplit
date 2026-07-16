@@ -27,6 +27,12 @@ enum GroupStatus {
   CLOSED
 }
 
+enum InviteLinkStatus {
+  PENDING
+  ACTIVE
+  EXPIRED
+}
+
 model Group {
   id        String      @id @default(uuid())
   name      String
@@ -35,7 +41,8 @@ model Group {
   createdAt DateTime    @default(now()) @map("created_at")
 
   owner   User          @relation("GroupOwner", fields: [ownerId], references: [id])
-  members GroupMember[]
+  members   GroupMember[]
+  inviteLinks InviteLink[]
 
   @@map("groups")
 }
@@ -50,4 +57,17 @@ model GroupMember {
 
   @@id([groupId, userId])
   @@map("group_members")
+}
+
+model InviteLink {
+  id          String           @id @default(uuid())
+  groupId     String           @map("group_id")
+  token       String           @unique
+  status      InviteLinkStatus @default(PENDING)
+  createdAt   DateTime         @default(now()) @map("created_at")
+  activatedAt DateTime?        @map("activated_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@map("invite_links")
 }

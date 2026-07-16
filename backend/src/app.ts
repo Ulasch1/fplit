@@ -4,6 +4,7 @@ import healthRouter from './routes/health';
 import authRouter from './routes/auth';
 import meRouter from './routes/me';
 import groupsRouter from './routes/groups';
+import inviteLinksRouter from './routes/inviteLinks';
 
 const app = express();
 
@@ -29,5 +30,6 @@ app.use('/auth', authRouter);
 // Temporary protected test endpoint: GET /me
 app.use(meRouter);
 app.use('/groups', groupsRouter);
+app.use('/invite-links', inviteLinksRouter);
 
 export default app;

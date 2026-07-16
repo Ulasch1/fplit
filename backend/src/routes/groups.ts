@@ -5,6 +5,7 @@ import { prisma } from '../db';
 import { getActivationWindowMs } from '../lib/inviteConfig';
 import { formatGroup } from '../lib/formatGroup';
 import { formatExpense } from '../lib/formatExpense';
+import { computeNetBalances, simplifyDebts, ExpenseForBalance } from '../lib/checklist';
 
 const router = Router();
 
@@ -60,10 +61,44 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
       include: { group: true },
     });
 
-    const groups = memberships.map((m) => ({
-      ...formatGroup(m.group),
-      net_balance_kurus: 0, // real calculation in M6
-    }));
+    const groupIds = memberships.map((m) => m.groupId);
+
+    // N+1‑free batch load: all members + expenses for all groups at once
+    const detailedGroups = await prisma.group.findMany({
+      where: { id: { in: groupIds } },
+      include: {
+        members: { select: { userId: true } },
+        expenses: {
+          select: {
+            paidBy: true,
+            amountKurus: true,
+            splits: { select: { userId: true, shareAmountKurus: true } },
+          },
+        },
+      },
+    });
+
+    const groupMap = new Map(detailedGroups.map((g) => [g.id, g]));
+
+    const groups = memberships.flatMap((m) => {
+      const dg = groupMap.get(m.groupId);
+      if (!dg) return []; // group deleted concurrently: skip this membership
+      const memberIds = dg.members.map((mi) => mi.userId);
+      const expensesForBalance: ExpenseForBalance[] = dg.expenses.map((e) => ({
+        paidBy: e.paidBy,
+        amountKurus: e.amountKurus,
+        splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
+      }));
+      const balances = computeNetBalances(memberIds, expensesForBalance);
+      const net_balance_kurus = balances.get(req.userId!) ?? 0;
+
+      return [
+        {
+          ...formatGroup(m.group),
+          net_balance_kurus,
+        },
+      ];
+    });
 
     res.status(200).json(groups);
   } catch (error) {
@@ -115,11 +150,21 @@ router.get('/:id', requireAuth, async (req: Request, res: Response) => {
       joined_at: m.joinedAt,
     }));
 
+    // Compute checklist (M6)
+    const memberIds = group.members.map((m) => m.userId);
+    const expensesForBalance: ExpenseForBalance[] = group.expenses.map((e) => ({
+      paidBy: e.paidBy,
+      amountKurus: e.amountKurus,
+      splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
+    }));
+    const balances = computeNetBalances(memberIds, expensesForBalance);
+    const checklist = simplifyDebts(balances);
+
     res.status(200).json({
       ...formatGroup(group),
       members: membersList,
       expenses: group.expenses.map(formatExpense),
-      checklist: [], // real calculation in M6
+      checklist,
     });
   } catch (error) {
     console.error('GET /groups/:id error:', error);
@@ -371,6 +416,48 @@ router.get('/:groupId/expenses', requireAuth, async (req: Request, res: Response
     res.status(200).json(expenses.map(formatExpense));
   } catch (error) {
     console.error('GET /groups/:groupId/expenses error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /:groupId/checklist
+router.get('/:groupId/checklist', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const groupId = req.params.groupId;
+
+    const group = await prisma.group.findUnique({
+      where: { id: groupId },
+      include: {
+        members: { select: { userId: true } },
+        expenses: {
+          include: { splits: true },
+        },
+      },
+    });
+
+    if (!group) {
+      res.status(404).json({ error: 'Group not found' });
+      return;
+    }
+
+    if (!group.members.some((m) => m.userId === req.userId)) {
+      res.status(403).json({ error: 'You are not a member of this group' });
+      return;
+    }
+
+    const memberIds = group.members.map((m) => m.userId);
+    const expensesForBalance: ExpenseForBalance[] = group.expenses.map((e) => ({
+      paidBy: e.paidBy,
+      amountKurus: e.amountKurus,
+      splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
+    }));
+
+    const balances = computeNetBalances(memberIds, expensesForBalance);
+    const checklist = simplifyDebts(balances);
+
+    res.status(200).json(checklist);
+  } catch (error) {
+    console.error('GET /groups/:groupId/checklist error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

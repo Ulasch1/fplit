@@ -16,8 +16,10 @@ model User {
   name         String
   createdAt    DateTime @default(now()) @map("created_at")
 
-  ownedGroups Group[]        @relation("GroupOwner")
-  memberships GroupMember[]
+  ownedGroups   Group[]          @relation("GroupOwner")
+  memberships   GroupMember[]
+  expensesPaid  Expense[]        @relation("ExpensePayer")
+  expenseSplits ExpenseSplit[]   @relation("ExpenseSplitUser")
 
   @@map("users")
 }
@@ -41,8 +43,9 @@ model Group {
   createdAt DateTime    @default(now()) @map("created_at")
 
   owner   User          @relation("GroupOwner", fields: [ownerId], references: [id])
-  members   GroupMember[]
-  inviteLinks InviteLink[]
+  members       GroupMember[]
+  inviteLinks   InviteLink[]
+  expenses      Expense[]
 
   @@map("groups")
 }
@@ -70,4 +73,32 @@ model InviteLink {
   group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
   @@map("invite_links")
+}
+
+model Expense {
+  id          String   @id @default(uuid())
+  groupId     String   @map("group_id")
+  description String
+  amountKurus Int      @map("amount_kurus")
+  paidBy      String   @map("paid_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  group  Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  payer  User           @relation("ExpensePayer", fields: [paidBy], references: [id])
+  splits ExpenseSplit[]
+
+  @@map("expenses")
+}
+
+model ExpenseSplit {
+  id               String @id @default(uuid())
+  expenseId        String @map("expense_id")
+  userId           String @map("user_id")
+  shareAmountKurus Int    @map("share_amount_kurus")
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user    User    @relation("ExpenseSplitUser", fields: [userId], references: [id])
+
+  @@unique([expenseId, userId])
+  @@map("expense_splits")
 }

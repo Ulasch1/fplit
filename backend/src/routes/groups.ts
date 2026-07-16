@@ -4,6 +4,7 @@ import { requireAuth } from '../middleware/auth';
 import { prisma } from '../db';
 import { getActivationWindowMs } from '../lib/inviteConfig';
 import { formatGroup } from '../lib/formatGroup';
+import { formatExpense } from '../lib/formatExpense';
 
 const router = Router();
 
@@ -89,6 +90,10 @@ router.get('/:id', requireAuth, async (req: Request, res: Response) => {
             },
           },
         },
+        expenses: {
+          include: { splits: true },
+          orderBy: { createdAt: 'asc' },
+        },
       },
     });
 
@@ -113,7 +118,7 @@ router.get('/:id', requireAuth, async (req: Request, res: Response) => {
     res.status(200).json({
       ...formatGroup(group),
       members: membersList,
-      expenses: [], // real list in M5
+      expenses: group.expenses.map(formatExpense),
       checklist: [], // real calculation in M6
     });
   } catch (error) {
@@ -224,6 +229,148 @@ router.post('/:id/invite-link', requireAuth, async (req: Request, res: Response)
     });
   } catch (error) {
     console.error('POST /groups/:id/invite-link error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:groupId/expenses
+router.post('/:groupId/expenses', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const groupId = req.params.groupId;
+    const { description, amount_kurus, paid_by } = req.body;
+
+    // 1. Fetch group with members
+    const group = await prisma.group.findUnique({
+      where: { id: groupId },
+      include: { members: true },
+    });
+
+    if (!group) {
+      res.status(404).json({ error: 'Group not found' });
+      return;
+    }
+
+    // 2. Caller membership check
+    if (!group.members.some((m) => m.userId === req.userId)) {
+      res.status(403).json({ error: 'You are not a member of this group' });
+      return;
+    }
+
+    // 3. Closed group check
+    if (group.status === 'CLOSED') {
+      res.status(400).json({ error: 'Cannot add an expense to a closed group' });
+      return;
+    }
+
+    // 4. Description validation
+    if (typeof description !== 'string' || description.trim().length === 0) {
+      res.status(400).json({ error: 'Description is required' });
+      return;
+    }
+    const trimmedDescription = description.trim();
+    if (trimmedDescription.length > 200) {
+      res.status(400).json({ error: 'Description must be at most 200 characters' });
+      return;
+    }
+
+    // 5. amount_kurus validation
+    if (typeof amount_kurus !== 'number' || !Number.isInteger(amount_kurus) || amount_kurus <= 0) {
+      res.status(400).json({ error: 'amount_kurus must be a positive integer' });
+      return;
+    }
+
+    if (amount_kurus > 2147483647) {
+      res.status(400).json({ error: 'amount_kurus is too large' });
+      return;
+    }
+
+    // 6. paid_by validation
+    if (typeof paid_by !== 'string' || !group.members.some((m) => m.userId === paid_by)) {
+      res.status(400).json({ error: 'paid_by must be a member of the group' });
+      return;
+    }
+
+    // Split calculation
+    const memberIds = group.members.map((m) => m.userId);
+    const n = memberIds.length;
+    const base = Math.floor(amount_kurus / n);
+    const remainder = amount_kurus - base * n;
+
+    const splitsData = memberIds.map((userId) => ({
+      userId,
+      shareAmountKurus: base + (userId === paid_by ? remainder : 0),
+    }));
+
+    // Persist in transaction
+    const expense = await prisma.$transaction(async (tx) => {
+      const createdExpense = await tx.expense.create({
+        data: {
+          groupId,
+          description: trimmedDescription,
+          amountKurus: amount_kurus,
+          paidBy: paid_by,
+        },
+      });
+
+      // Insert splits
+      if (splitsData.length > 0) {
+        await tx.expenseSplit.createMany({
+          data: splitsData.map((s) => ({
+            expenseId: createdExpense.id,
+            userId: s.userId,
+            shareAmountKurus: s.shareAmountKurus,
+          })),
+        });
+      }
+
+      // Re-read with splits
+      return tx.expense.findUnique({
+        where: { id: createdExpense.id },
+        include: { splits: true },
+      });
+    });
+
+    if (!expense) {
+      // Should not happen
+      throw new Error('Failed to create expense');
+    }
+
+    res.status(201).json(formatExpense(expense));
+  } catch (error) {
+    console.error('POST /groups/:groupId/expenses error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /:groupId/expenses
+router.get('/:groupId/expenses', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const groupId = req.params.groupId;
+
+    const group = await prisma.group.findUnique({
+      where: { id: groupId },
+      include: { members: true },
+    });
+
+    if (!group) {
+      res.status(404).json({ error: 'Group not found' });
+      return;
+    }
+
+    if (!group.members.some((m) => m.userId === req.userId)) {
+      res.status(403).json({ error: 'You are not a member of this group' });
+      return;
+    }
+
+    const expenses = await prisma.expense.findMany({
+      where: { groupId },
+      include: { splits: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    res.status(200).json(expenses.map(formatExpense));
+  } catch (error) {
+    console.error('GET /groups/:groupId/expenses error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

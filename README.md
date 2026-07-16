@@ -94,4 +94,5 @@ Set `NEXT_PUBLIC_API_URL=http://localhost:4000` (already provided in `.env.local
 
 ## Milestone status
 
-- **M1: done.** Skeleton + health check + database connection.
+- **M1: done.** Skeleton + health check + database connection. Live on Vercel + Railway.
+- **M2: done.** Auth: register, login, JWT middleware.

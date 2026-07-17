@@ -102,7 +102,7 @@ router.patch('/:paymentId', requireAuth, async (req: Request, res: Response) => 
           include: {
             members: { select: { userId: true } },
             expenses: {
-              include: { splits: true },
+              // only scalar fields needed; no splits loaded
             },
             payments: {
               where: { status: 'CONFIRMED' },
@@ -116,7 +116,6 @@ router.patch('/:paymentId', requireAuth, async (req: Request, res: Response) => 
           const expensesForBalance: ExpenseForBalance[] = group.expenses.map((e) => ({
             paidBy: e.paidBy,
             amountKurus: e.amountKurus,
-            splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
           }));
           const paymentsForBalance: PaymentForBalance[] = group.payments.map((p) => ({
             fromUser: p.fromUser,

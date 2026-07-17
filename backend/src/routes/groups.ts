@@ -9,6 +9,7 @@ import { formatExpense } from '../lib/formatExpense';
 import { formatPayment } from '../lib/formatPayment';
 import {
   computeNetBalances,
+  computeExpenseSplits,
   simplifyDebts,
   ExpenseForBalance,
   PaymentForBalance,
@@ -70,7 +71,9 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
 
     const groupIds = memberships.map((m) => m.groupId);
 
-    // N+1‑free batch load: all members + expenses + CONFIRMED payments for all groups at once
+    // N+1‑free batch load: all members + expenses + CONFIRMED payments for all groups at once.
+    // NOTE: ExpenseSplit rows are intentionally NOT read; splits are recomputed live from
+    // the CURRENT member list (time-independent split behaviour).
     const detailedGroups = await prisma.group.findMany({
       where: { id: { in: groupIds } },
       include: {
@@ -79,7 +82,6 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
           select: {
             paidBy: true,
             amountKurus: true,
-            splits: { select: { userId: true, shareAmountKurus: true } },
           },
         },
         payments: {
@@ -98,7 +100,6 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
       const expensesForBalance: ExpenseForBalance[] = dg.expenses.map((e) => ({
         paidBy: e.paidBy,
         amountKurus: e.amountKurus,
-        splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
       }));
       const paymentsForBalance: PaymentForBalance[] = dg.payments.map((p) => ({
         fromUser: p.fromUser,
@@ -142,7 +143,6 @@ router.get('/:id', requireAuth, async (req: Request, res: Response) => {
           },
         },
         expenses: {
-          include: { splits: true },
           orderBy: { createdAt: 'asc' },
         },
         payments: {
@@ -170,7 +170,7 @@ router.get('/:id', requireAuth, async (req: Request, res: Response) => {
       joined_at: m.joinedAt,
     }));
 
-    // Compute checklist (M6)
+    // Compute checklist (M6). Splits are computed live from the CURRENT member list.
     // Fetch pending payments for annotation
     const pendingPayments = await prisma.payment.findMany({
       where: { groupId, status: 'PENDING_CONFIRMATION' },
@@ -181,7 +181,6 @@ router.get('/:id', requireAuth, async (req: Request, res: Response) => {
     const expensesForBalance: ExpenseForBalance[] = group.expenses.map((e) => ({
       paidBy: e.paidBy,
       amountKurus: e.amountKurus,
-      splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
     }));
     const paymentsForBalance: PaymentForBalance[] = group.payments.map((p) => ({
       fromUser: p.fromUser,
@@ -194,7 +193,13 @@ router.get('/:id', requireAuth, async (req: Request, res: Response) => {
     res.status(200).json({
       ...formatGroup(group),
       members: membersList,
-      expenses: group.expenses.map(formatExpense),
+      // Expense splits are computed live against the current member list, not read from DB.
+      expenses: group.expenses.map((e) =>
+        formatExpense({
+          ...e,
+          splits: computeExpenseSplits(e.amountKurus, e.paidBy, memberIds),
+        }),
+      ),
       checklist,
     });
   } catch (error) {
@@ -366,20 +371,15 @@ router.post('/:groupId/expenses', requireAuth, async (req: Request, res: Respons
       return;
     }
 
-    // Split calculation
+    // Split calculation for persistence (historical/audit snapshot only — NOT read back).
+    // Reads recompute splits live from the current member list.
     const memberIds = group.members.map((m) => m.userId);
-    const n = memberIds.length;
-    const base = Math.floor(amount_kurus / n);
-    const remainder = amount_kurus - base * n;
+    const splitsData = computeExpenseSplits(amount_kurus, paid_by, memberIds);
 
-    const splitsData = memberIds.map((userId) => ({
-      userId,
-      shareAmountKurus: base + (userId === paid_by ? remainder : 0),
-    }));
-
-    // Persist in transaction
-    const expense = await prisma.$transaction(async (tx) => {
-      const createdExpense = await tx.expense.create({
+    // Persist in transaction. The ExpenseSplit rows are still written for audit/history,
+    // but no read path consumes them anymore.
+    const createdExpense = await prisma.$transaction(async (tx) => {
+      const expense = await tx.expense.create({
         data: {
           groupId,
           description: trimmedDescription,
@@ -388,30 +388,33 @@ router.post('/:groupId/expenses', requireAuth, async (req: Request, res: Respons
         },
       });
 
-      // Insert splits
+      // Insert splits (audit snapshot)
       if (splitsData.length > 0) {
         await tx.expenseSplit.createMany({
           data: splitsData.map((s) => ({
-            expenseId: createdExpense.id,
+            expenseId: expense.id,
             userId: s.userId,
             shareAmountKurus: s.shareAmountKurus,
           })),
         });
       }
 
-      // Re-read with splits
-      return tx.expense.findUnique({
-        where: { id: createdExpense.id },
-        include: { splits: true },
-      });
+      return expense;
     });
 
-    if (!expense) {
-      // Should not happen
-      throw new Error('Failed to create expense');
-    }
-
-    res.status(201).json(formatExpense(expense));
+    // Response splits are computed live (identical to splitsData at creation time, since
+    // the current member list is the same, but sourced live for consistency).
+    res.status(201).json(
+      formatExpense({
+        id: createdExpense.id,
+        groupId: createdExpense.groupId,
+        description: createdExpense.description,
+        amountKurus: createdExpense.amountKurus,
+        paidBy: createdExpense.paidBy,
+        createdAt: createdExpense.createdAt,
+        splits: computeExpenseSplits(createdExpense.amountKurus, createdExpense.paidBy, memberIds),
+      }),
+    );
   } catch (error) {
     console.error('POST /groups/:groupId/expenses error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -438,13 +441,22 @@ router.get('/:groupId/expenses', requireAuth, async (req: Request, res: Response
       return;
     }
 
+    const memberIds = group.members.map((m) => m.userId);
+
     const expenses = await prisma.expense.findMany({
       where: { groupId },
-      include: { splits: true },
       orderBy: { createdAt: 'asc' },
     });
 
-    res.status(200).json(expenses.map(formatExpense));
+    // Splits computed live against the current member list, not read from ExpenseSplit.
+    res.status(200).json(
+      expenses.map((e) =>
+        formatExpense({
+          ...e,
+          splits: computeExpenseSplits(e.amountKurus, e.paidBy, memberIds),
+        }),
+      ),
+    );
   } catch (error) {
     console.error('GET /groups/:groupId/expenses error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -461,7 +473,7 @@ router.get('/:groupId/checklist', requireAuth, async (req: Request, res: Respons
       include: {
         members: { select: { userId: true } },
         expenses: {
-          include: { splits: true },
+          select: { paidBy: true, amountKurus: true },
         },
         payments: {
           where: { status: 'CONFIRMED' },
@@ -490,7 +502,6 @@ router.get('/:groupId/checklist', requireAuth, async (req: Request, res: Respons
     const expensesForBalance: ExpenseForBalance[] = group.expenses.map((e) => ({
       paidBy: e.paidBy,
       amountKurus: e.amountKurus,
-      splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
     }));
 
     const paymentsForBalance: PaymentForBalance[] = group.payments.map((p) => ({
@@ -521,7 +532,7 @@ router.post('/:groupId/payments', requireAuth, async (req: Request, res: Respons
       include: {
         members: true,
         expenses: {
-          include: { splits: true },
+          select: { paidBy: true, amountKurus: true },
         },
         payments: {
           where: { status: 'CONFIRMED' },
@@ -561,12 +572,11 @@ router.post('/:groupId/payments', requireAuth, async (req: Request, res: Respons
       return;
     }
 
-    // 5. Verify exact checklist match
+    // 5. Verify exact checklist match (balances computed live against current members)
     const memberIds = group.members.map((m) => m.userId);
     const expensesForBalance: ExpenseForBalance[] = group.expenses.map((e) => ({
       paidBy: e.paidBy,
       amountKurus: e.amountKurus,
-      splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
     }));
     const paymentsForBalance: PaymentForBalance[] = group.payments.map((p) => ({
       fromUser: p.fromUser,

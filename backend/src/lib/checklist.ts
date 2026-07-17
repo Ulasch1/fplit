@@ -2,7 +2,7 @@
 // Checklist – computed view (never persisted). The «ledger architecture»:
 //   net_balance(U) =
 //     Σ(Expense.amountKurus where paidBy=U)
-//   − Σ(ExpenseSplit.shareAmountKurus where userId=U)
+//   − Σ(computed share for U in ALL group expenses, based on CURRENT member list)
 //   + Σ(CONFIRMED Payment.amountKurus where from_user=U)
 //   − Σ(CONFIRMED Payment.amountKurus where to_user=U)
 // ---------------------------------------------------------------------------
@@ -10,7 +10,6 @@
 export interface ExpenseForBalance {
   paidBy: string;
   amountKurus: number;
-  splits: { userId: string; shareAmountKurus: number }[];
 }
 
 export interface PaymentForBalance {
@@ -27,11 +26,36 @@ export interface ChecklistTransfer {
 }
 
 /**
+ * Compute the per-member share amounts for a single expense using the CURRENT
+ * member list (the ExpenseSplit table is NOT used as a computation source).
+ *
+ * Rounding rule: base = floor(amountKurus / n). The leftover remainder kurus
+ * is added to the payer's own share, so the sum always equals amountKurus.
+ */
+export function computeExpenseSplits(
+  amountKurus: number,
+  payerId: string,
+  memberIds: string[],
+): { userId: string; shareAmountKurus: number }[] {
+  const n = memberIds.length;
+  if (n === 0) return [];
+  const base = Math.floor(amountKurus / n);
+  const remainder = amountKurus - base * n;
+  return memberIds.map((userId) => ({
+    userId,
+    shareAmountKurus: base + (userId === payerId ? remainder : 0),
+  }));
+}
+
+/**
  * Compute net balances for every member given the current ledger entries.
+ *
+ * Splits are recomputed LIVE from the CURRENT member list for every call;
+ * the persisted ExpenseSplit table is no longer a computation source.
  *
  * Full formula:
  *   net_balance(U) = Σ(Expense.amountKurus where paidBy=U)
- *                  − Σ(ExpenseSplit.shareAmountKurus where userId=U)
+ *                  − Σ(computed share for U across every expense)
  *                  + Σ(CONFIRMED Payment.amountKurus where from_user=U)
  *                  − Σ(CONFIRMED Payment.amountKurus where to_user=U)
  */
@@ -51,8 +75,8 @@ export function computeNetBalances(
     // + what the payer spent
     balances.set(exp.paidBy, (balances.get(exp.paidBy) ?? 0) + exp.amountKurus);
 
-    // − each member's share
-    for (const split of exp.splits) {
+    // − each member's live-computed share
+    for (const split of computeExpenseSplits(exp.amountKurus, exp.paidBy, memberIds)) {
       balances.set(split.userId, (balances.get(split.userId) ?? 0) - split.shareAmountKurus);
     }
   }

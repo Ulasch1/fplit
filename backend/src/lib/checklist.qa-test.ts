@@ -32,33 +32,19 @@ function assertTrue(cond: boolean, msg: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 1: classic 3-person cross-expense scenario
+// Scenario 1: classic 3-person cross-expense scenario (live split, same members)
 // ---------------------------------------------------------------------------
 {
   const A = 'A', B = 'B', C = 'C';
   const members = [A, B, C];
   const expenses: ExpenseForBalance[] = [
-    {
-      paidBy: A,
-      amountKurus: 3000,
-      splits: [
-        { userId: A, shareAmountKurus: 1000 },
-        { userId: B, shareAmountKurus: 1000 },
-        { userId: C, shareAmountKurus: 1000 },
-      ],
-    },
-    {
-      paidBy: B,
-      amountKurus: 3000,
-      splits: [
-        { userId: A, shareAmountKurus: 1000 },
-        { userId: B, shareAmountKurus: 1000 },
-        { userId: C, shareAmountKurus: 1000 },
-      ],
-    },
+    { paidBy: A, amountKurus: 3000 },
+    { paidBy: B, amountKurus: 3000 },
   ];
 
   const balances = computeNetBalances(members, expenses);
+  // Each expense split equally: 1000/1000/1000 (no remainder). A and B each +3000-1000=+2000? Wait recalc:
+  // For A's expense: A +3000 (paid), shares A-1000, B-1000, C-1000 => A +2000. For B's expense: B +3000 (paid), shares A-1000, B-1000, C-1000 => B +2000, A -1000. Net: A +2000-1000=+1000, B +2000-1000=+1000, C -2000.
   assertEqual(balances.get(A), 1000, 'Scenario1: A net balance = +1000');
   assertEqual(balances.get(B), 1000, 'Scenario1: B net balance = +1000');
   assertEqual(balances.get(C), -2000, 'Scenario1: C net balance = -2000');
@@ -113,24 +99,17 @@ function assertTrue(cond: boolean, msg: string) {
 
 // ---------------------------------------------------------------------------
 // Scenario 4: rounding-remainder split (100 / 3 = 33/33/34, payer gets remainder)
+// Live model computes same values
 // ---------------------------------------------------------------------------
 {
   const A = 'A', B = 'B', C = 'C';
   const members = [A, B, C];
-  // A pays 100, split 34/33/33 with A (payer) getting the extra kurus
   const expenses: ExpenseForBalance[] = [
-    {
-      paidBy: A,
-      amountKurus: 100,
-      splits: [
-        { userId: A, shareAmountKurus: 34 },
-        { userId: B, shareAmountKurus: 33 },
-        { userId: C, shareAmountKurus: 33 },
-      ],
-    },
+    { paidBy: A, amountKurus: 100 },
   ];
   const balances = computeNetBalances(members, expenses);
-  // A: +100 - 34 = 66 ; B: -33 ; C: -33
+  // base = 33, remainder 1 goes to payer A => shares: A 34, B 33, C 33.
+  // A: +100 -34 = 66; B: -33; C: -33
   assertEqual(balances.get(A), 66, 'Scenario4: A balance = 66');
   assertEqual(balances.get(B), -33, 'Scenario4: B balance = -33');
   assertEqual(balances.get(C), -33, 'Scenario4: C balance = -33');
@@ -149,8 +128,6 @@ function assertTrue(cond: boolean, msg: string) {
 
 // ---------------------------------------------------------------------------
 // Scenario 5: generic property check across a more complex 5-person balance set
-// verify: every transfer positive integer, sum(transfers) == sum(positive balances),
-// and min-transfer-count property (<= n-1)
 // ---------------------------------------------------------------------------
 {
   const balances = new Map<string, number>([
@@ -170,7 +147,6 @@ function assertTrue(cond: boolean, msg: string) {
     'Scenario5: every transfer amount is a positive integer',
   );
 
-  // Verify resulting balances after applying transfers reach zero
   const finalBalances = new Map(balances);
   for (const t of checklist) {
     finalBalances.set(t.from_user, (finalBalances.get(t.from_user) ?? 0) + t.amount_kurus);
@@ -183,98 +159,102 @@ function assertTrue(cond: boolean, msg: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 6: member with zero activity should not appear in checklist
+// Scenario 6: LATE-JOINING member retroactively shares a pre-existing expense
+// (new behaviour: splits are computed against the CURRENT member list, not historic)
 // ---------------------------------------------------------------------------
 {
-  const A = 'A', B = 'B', C = 'C';
-  const balances = computeNetBalances([A, B, C], [
-    {
-      paidBy: A,
-      amountKurus: 200,
-      splits: [
-        { userId: A, shareAmountKurus: 100 },
-        { userId: B, shareAmountKurus: 100 },
-      ],
-    },
-  ]);
-  assertEqual(balances.get(C), 0, 'Scenario6: uninvolved member C balance stays 0');
+  const A = 'A', B = 'B', C = 'C';  // C joined after the expense was created
+  const members = [A, B, C];
+  const expenses: ExpenseForBalance[] = [
+    { paidBy: A, amountKurus: 30 },
+  ];
+
+  const balances = computeNetBalances(members, expenses);
+  // 30 split evenly across 3 -> 10 each, no remainder
+  // A: +30 -10 = +20
+  // B: -10
+  // C: -10
+  assertEqual(balances.get(A), 20, 'Scenario6: A (payer) = +20');
+  assertEqual(balances.get(B), -10, 'Scenario6: B = -10 (late joiner shares expense)');
+  assertEqual(balances.get(C), -10, 'Scenario6: C = -10 (late joiner shares expense)');
+
   const checklist = simplifyDebts(balances);
+  const totalTransferred = checklist.reduce((s, t) => s + t.amount_kurus, 0);
+  assertEqual(totalTransferred, 20, 'Scenario6: total transferred = 20');
   assertTrue(
-    !checklist.some((t) => t.from_user === C || t.to_user === C),
-    'Scenario6: uninvolved member does not appear in checklist',
+    checklist.some((t) => t.from_user === B || t.from_user === C),
+    'Scenario6: B and/or C appear as debtors',
   );
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 7 (M7 regression): a CONFIRMED payment must SETTLE debt, not
-// double it. Bug that was fixed: net-balance computation applied the
-// confirmed payment with the wrong sign, so paying off a 5000 debt resulted
-// in a 10000 debt instead of 0.
-// A owes B 5000 (single expense: B pays 10000 split 5000/5000).
-// A pays B 5000 and it gets CONFIRMED -> balances must be exactly 0/0 and
-// the checklist must be empty (not doubled to 10000).
-// ---------------------------------------------------------------------------
-{
-  const A = 'A', B = 'B';
-  const members = [A, B];
-  const expenses: ExpenseForBalance[] = [
-    {
-      paidBy: B,
-      amountKurus: 10000,
-      splits: [
-        { userId: A, shareAmountKurus: 5000 },
-        { userId: B, shareAmountKurus: 5000 },
-      ],
-    },
-  ];
-
-  // Sanity: before any payment, A owes B 5000
-  const balancesBefore = computeNetBalances(members, expenses);
-  assertEqual(balancesBefore.get(A), -5000, 'Scenario7: before payment, A balance = -5000');
-  assertEqual(balancesBefore.get(B), 5000, 'Scenario7: before payment, B balance = +5000');
-
-  const balancesAfter = computeNetBalances(members, expenses, [
-    { fromUser: A, toUser: B, amountKurus: 5000 },
-  ]);
-  assertEqual(balancesAfter.get(A), 0, 'Scenario7 (regression): after CONFIRMED payment, A balance = 0 (not -10000)');
-  assertEqual(balancesAfter.get(B), 0, 'Scenario7 (regression): after CONFIRMED payment, B balance = 0 (not +10000)');
-
-  const checklistAfter = simplifyDebts(balancesAfter);
-  assertEqual(checklistAfter, [], 'Scenario7 (regression): checklist is EMPTY after fully-settling confirmed payment');
-}
-
-// ---------------------------------------------------------------------------
-// Scenario 8 (M7 regression): partial settlement across a multi-debt group.
-// C is owed 3000 by both A and B. A settles fully; B's debt must remain
-// untouched (group would stay ACTIVE), then B settles and everything is 0.
+// Scenario 7: rounding remainder still goes to the payer under live model
+// e.g. members [A,B,C], expense paidBy B amountKurus 100
 // ---------------------------------------------------------------------------
 {
   const A = 'A', B = 'B', C = 'C';
   const members = [A, B, C];
   const expenses: ExpenseForBalance[] = [
-    {
-      paidBy: C,
-      amountKurus: 9000,
-      splits: [
-        { userId: A, shareAmountKurus: 3000 },
-        { userId: B, shareAmountKurus: 3000 },
-        { userId: C, shareAmountKurus: 3000 },
-      ],
-    },
+    { paidBy: B, amountKurus: 100 },
+  ];
+
+  const balances = computeNetBalances(members, expenses);
+  // base = 33, remainder 1 goes to payer B -> shares: A 33, B 34, C 33
+  // B: +100 -34 = +66; A: -33; C: -33
+  assertEqual(balances.get(A), -33, 'Scenario7: A = -33');
+  assertEqual(balances.get(B), 66, 'Scenario7: B (payer) = +66');
+  assertEqual(balances.get(C), -33, 'Scenario7: C = -33');
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 8 (M7 regression): a CONFIRMED payment must SETTLE debt, not double it.
+// A owes B 5000 (single expense: B pays 10000 split 5000/5000). A pays B 5000
+// and it gets CONFIRMED -> balances must be exactly 0/0 and checklist empty.
+// ---------------------------------------------------------------------------
+{
+  const A = 'A', B = 'B';
+  const members = [A, B];
+  const expenses: ExpenseForBalance[] = [
+    { paidBy: B, amountKurus: 10000 },
+  ];
+
+  const balancesBefore = computeNetBalances(members, expenses);
+  assertEqual(balancesBefore.get(A), -5000, 'Scenario8: before payment, A balance = -5000');
+  assertEqual(balancesBefore.get(B), 5000, 'Scenario8: before payment, B balance = +5000');
+
+  const balancesAfter = computeNetBalances(members, expenses, [
+    { fromUser: A, toUser: B, amountKurus: 5000 },
+  ]);
+  assertEqual(balancesAfter.get(A), 0, 'Scenario8 (regression): after CONFIRMED payment, A balance = 0 (not -10000)');
+  assertEqual(balancesAfter.get(B), 0, 'Scenario8 (regression): after CONFIRMED payment, B balance = 0 (not +10000)');
+
+  const checklistAfter = simplifyDebts(balancesAfter);
+  assertEqual(checklistAfter, [], 'Scenario8 (regression): checklist is EMPTY after fully-settling confirmed payment');
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 9 (M7 regression): partial settlement across a multi-debt group.
+// C is owed 3000 by both A and B. A settles fully; B's debt must remain untouched.
+// ---------------------------------------------------------------------------
+{
+  const A = 'A', B = 'B', C = 'C';
+  const members = [A, B, C];
+  const expenses: ExpenseForBalance[] = [
+    { paidBy: C, amountKurus: 9000 },
   ];
 
   // Only A's payment confirmed so far
   const balancesPartial = computeNetBalances(members, expenses, [
     { fromUser: A, toUser: C, amountKurus: 3000 },
   ]);
-  assertEqual(balancesPartial.get(A), 0, 'Scenario8: after A settles, A balance = 0');
-  assertEqual(balancesPartial.get(B), -3000, 'Scenario8: B balance still -3000 (untouched)');
-  assertEqual(balancesPartial.get(C), 3000, 'Scenario8: C balance still +3000 (not yet fully settled)');
+  assertEqual(balancesPartial.get(A), 0, 'Scenario9: after A settles, A balance = 0');
+  assertEqual(balancesPartial.get(B), -3000, 'Scenario9: B balance still -3000 (untouched)');
+  assertEqual(balancesPartial.get(C), 3000, 'Scenario9: C balance still +3000 (not yet fully settled)');
   const checklistPartial = simplifyDebts(balancesPartial);
   assertEqual(
     checklistPartial,
     [{ from_user: B, to_user: C, amount_kurus: 3000, pending_payment_id: null }],
-    'Scenario8: checklist shows only remaining B->C 3000 debt (group should stay ACTIVE)',
+    'Scenario9: checklist shows only remaining B->C 3000 debt',
   );
 
   // Both A and B's payments confirmed
@@ -282,11 +262,11 @@ function assertTrue(cond: boolean, msg: string) {
     { fromUser: A, toUser: C, amountKurus: 3000 },
     { fromUser: B, toUser: C, amountKurus: 3000 },
   ]);
-  assertEqual(balancesFull.get(A), 0, 'Scenario8: after both settle, A balance = 0');
-  assertEqual(balancesFull.get(B), 0, 'Scenario8: after both settle, B balance = 0');
-  assertEqual(balancesFull.get(C), 0, 'Scenario8: after both settle, C balance = 0');
+  assertEqual(balancesFull.get(A), 0, 'Scenario9: after both settle, A balance = 0');
+  assertEqual(balancesFull.get(B), 0, 'Scenario9: after both settle, B balance = 0');
+  assertEqual(balancesFull.get(C), 0, 'Scenario9: after both settle, C balance = 0');
   const checklistFull = simplifyDebts(balancesFull);
-  assertEqual(checklistFull, [], 'Scenario8 (regression): checklist EMPTY once all debts confirmed-settled (group should CLOSE)');
+  assertEqual(checklistFull, [], 'Scenario9 (regression): checklist EMPTY once all debts confirmed-settled');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

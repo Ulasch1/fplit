@@ -20,6 +20,9 @@ model User {
   memberships   GroupMember[]
   expensesPaid  Expense[]        @relation("ExpensePayer")
   expenseSplits ExpenseSplit[]   @relation("ExpenseSplitUser")
+  paymentsFrom   Payment[]       @relation("PaymentFrom")
+  paymentsTo     Payment[]       @relation("PaymentTo")
+  notifications  Notification[]
 
   @@map("users")
 }
@@ -46,6 +49,7 @@ model Group {
   members       GroupMember[]
   inviteLinks   InviteLink[]
   expenses      Expense[]
+  payments      Payment[]
 
   @@map("groups")
 }
@@ -101,4 +105,54 @@ model ExpenseSplit {
 
   @@unique([expenseId, userId])
   @@map("expense_splits")
+}
+
+enum PaymentStatus {
+  PENDING_CONFIRMATION
+  CONFIRMED
+  REJECTED
+}
+
+enum RejectionReason {
+  FORGOT
+  WRONG_AMOUNT
+  OTHER
+}
+
+enum NotificationType {
+  SETTLEMENT_CONFIRMATION_REQUEST
+}
+
+model Payment {
+  id              String          @id @default(uuid())
+  groupId         String          @map("group_id")
+  fromUser        String          @map("from_user")
+  toUser          String          @map("to_user")
+  amountKurus     Int             @map("amount_kurus")
+  status          PaymentStatus   @default(PENDING_CONFIRMATION)
+  createdAt       DateTime        @default(now()) @map("created_at")
+  confirmedAt     DateTime?       @map("confirmed_at")
+  rejectionReason RejectionReason? @map("rejection_reason")
+  rejectionNote   String?         @map("rejection_note")
+
+  group         Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  payer         User           @relation("PaymentFrom", fields: [fromUser], references: [id])
+  payee         User           @relation("PaymentTo", fields: [toUser], references: [id])
+  notifications Notification[]
+
+  @@map("payments")
+}
+
+model Notification {
+  id               String           @id @default(uuid())
+  userId           String           @map("user_id")
+  type             NotificationType
+  relatedPaymentId String           @map("related_payment_id")
+  isRead           Boolean          @default(false) @map("is_read")
+  createdAt        DateTime         @default(now()) @map("created_at")
+
+  user    User    @relation(fields: [userId], references: [id])
+  payment Payment @relation(fields: [relatedPaymentId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
 }

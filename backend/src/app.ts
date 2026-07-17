@@ -5,6 +5,8 @@ import authRouter from './routes/auth';
 import meRouter from './routes/me';
 import groupsRouter from './routes/groups';
 import inviteLinksRouter from './routes/inviteLinks';
+import paymentsRouter from './routes/payments';
+import notificationsRouter from './routes/notifications';
 
 const app = express();
 
@@ -31,5 +33,7 @@ app.use('/auth', authRouter);
 app.use(meRouter);
 app.use('/groups', groupsRouter);
 app.use('/invite-links', inviteLinksRouter);
+app.use('/payments', paymentsRouter);
+app.use('/notifications', notificationsRouter);
 
 export default app;

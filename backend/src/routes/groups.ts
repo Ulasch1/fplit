@@ -2,10 +2,17 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { requireAuth } from '../middleware/auth';
 import { prisma } from '../db';
+import { Prisma } from '@prisma/client';
 import { getActivationWindowMs } from '../lib/inviteConfig';
 import { formatGroup } from '../lib/formatGroup';
 import { formatExpense } from '../lib/formatExpense';
-import { computeNetBalances, simplifyDebts, ExpenseForBalance } from '../lib/checklist';
+import { formatPayment } from '../lib/formatPayment';
+import {
+  computeNetBalances,
+  simplifyDebts,
+  ExpenseForBalance,
+  PaymentForBalance,
+} from '../lib/checklist';
 
 const router = Router();
 
@@ -63,7 +70,7 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
 
     const groupIds = memberships.map((m) => m.groupId);
 
-    // N+1‑free batch load: all members + expenses for all groups at once
+    // N+1‑free batch load: all members + expenses + CONFIRMED payments for all groups at once
     const detailedGroups = await prisma.group.findMany({
       where: { id: { in: groupIds } },
       include: {
@@ -74,6 +81,10 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
             amountKurus: true,
             splits: { select: { userId: true, shareAmountKurus: true } },
           },
+        },
+        payments: {
+          where: { status: 'CONFIRMED' },
+          select: { fromUser: true, toUser: true, amountKurus: true },
         },
       },
     });
@@ -89,7 +100,12 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
         amountKurus: e.amountKurus,
         splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
       }));
-      const balances = computeNetBalances(memberIds, expensesForBalance);
+      const paymentsForBalance: PaymentForBalance[] = dg.payments.map((p) => ({
+        fromUser: p.fromUser,
+        toUser: p.toUser,
+        amountKurus: p.amountKurus,
+      }));
+      const balances = computeNetBalances(memberIds, expensesForBalance, paymentsForBalance);
       const net_balance_kurus = balances.get(req.userId!) ?? 0;
 
       return [
@@ -129,6 +145,10 @@ router.get('/:id', requireAuth, async (req: Request, res: Response) => {
           include: { splits: true },
           orderBy: { createdAt: 'asc' },
         },
+        payments: {
+          where: { status: 'CONFIRMED' },
+          select: { fromUser: true, toUser: true, amountKurus: true },
+        },
       },
     });
 
@@ -151,14 +171,25 @@ router.get('/:id', requireAuth, async (req: Request, res: Response) => {
     }));
 
     // Compute checklist (M6)
+    // Fetch pending payments for annotation
+    const pendingPayments = await prisma.payment.findMany({
+      where: { groupId, status: 'PENDING_CONFIRMATION' },
+      select: { id: true, fromUser: true, toUser: true, amountKurus: true },
+    });
+
     const memberIds = group.members.map((m) => m.userId);
     const expensesForBalance: ExpenseForBalance[] = group.expenses.map((e) => ({
       paidBy: e.paidBy,
       amountKurus: e.amountKurus,
       splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
     }));
-    const balances = computeNetBalances(memberIds, expensesForBalance);
-    const checklist = simplifyDebts(balances);
+    const paymentsForBalance: PaymentForBalance[] = group.payments.map((p) => ({
+      fromUser: p.fromUser,
+      toUser: p.toUser,
+      amountKurus: p.amountKurus,
+    }));
+    const balances = computeNetBalances(memberIds, expensesForBalance, paymentsForBalance);
+    const checklist = simplifyDebts(balances, pendingPayments);
 
     res.status(200).json({
       ...formatGroup(group),
@@ -432,6 +463,10 @@ router.get('/:groupId/checklist', requireAuth, async (req: Request, res: Respons
         expenses: {
           include: { splits: true },
         },
+        payments: {
+          where: { status: 'CONFIRMED' },
+          select: { fromUser: true, toUser: true, amountKurus: true },
+        },
       },
     });
 
@@ -445,6 +480,12 @@ router.get('/:groupId/checklist', requireAuth, async (req: Request, res: Respons
       return;
     }
 
+    // Fetch pending payments for annotation
+    const pendingPayments = await prisma.payment.findMany({
+      where: { groupId, status: 'PENDING_CONFIRMATION' },
+      select: { id: true, fromUser: true, toUser: true, amountKurus: true },
+    });
+
     const memberIds = group.members.map((m) => m.userId);
     const expensesForBalance: ExpenseForBalance[] = group.expenses.map((e) => ({
       paidBy: e.paidBy,
@@ -452,12 +493,145 @@ router.get('/:groupId/checklist', requireAuth, async (req: Request, res: Respons
       splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
     }));
 
-    const balances = computeNetBalances(memberIds, expensesForBalance);
-    const checklist = simplifyDebts(balances);
+    const paymentsForBalance: PaymentForBalance[] = group.payments.map((p) => ({
+      fromUser: p.fromUser,
+      toUser: p.toUser,
+      amountKurus: p.amountKurus,
+    }));
+
+    const balances = computeNetBalances(memberIds, expensesForBalance, paymentsForBalance);
+    const checklist = simplifyDebts(balances, pendingPayments);
 
     res.status(200).json(checklist);
   } catch (error) {
     console.error('GET /groups/:groupId/checklist error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:groupId/payments – record a settlement
+router.post('/:groupId/payments', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const groupId = req.params.groupId;
+    const { to_user, amount_kurus } = req.body;
+
+    // 1. Fetch group with members, expenses, and CONFIRMED payments
+    const group = await prisma.group.findUnique({
+      where: { id: groupId },
+      include: {
+        members: true,
+        expenses: {
+          include: { splits: true },
+        },
+        payments: {
+          where: { status: 'CONFIRMED' },
+          select: { fromUser: true, toUser: true, amountKurus: true },
+        },
+      },
+    });
+
+    if (!group) {
+      res.status(404).json({ error: 'Group not found' });
+      return;
+    }
+
+    // 2. Caller must be a member
+    if (!group.members.some((m) => m.userId === req.userId)) {
+      res.status(403).json({ error: 'You are not a member of this group' });
+      return;
+    }
+
+    // 3. Group must not be closed
+    if (group.status === 'CLOSED') {
+      res.status(400).json({ error: 'Cannot settle in a closed group' });
+      return;
+    }
+
+    // 4. Validate body
+    if (typeof to_user !== 'string' || !group.members.some((m) => m.userId === to_user)) {
+      res.status(400).json({ error: 'to_user must be a valid group member' });
+      return;
+    }
+    if (typeof amount_kurus !== 'number' || !Number.isInteger(amount_kurus) || amount_kurus <= 0) {
+      res.status(400).json({ error: 'amount_kurus must be a positive integer' });
+      return;
+    }
+    if (to_user === req.userId) {
+      res.status(400).json({ error: 'You cannot pay yourself' });
+      return;
+    }
+
+    // 5. Verify exact checklist match
+    const memberIds = group.members.map((m) => m.userId);
+    const expensesForBalance: ExpenseForBalance[] = group.expenses.map((e) => ({
+      paidBy: e.paidBy,
+      amountKurus: e.amountKurus,
+      splits: e.splits.map((s) => ({ userId: s.userId, shareAmountKurus: s.shareAmountKurus })),
+    }));
+    const paymentsForBalance: PaymentForBalance[] = group.payments.map((p) => ({
+      fromUser: p.fromUser,
+      toUser: p.toUser,
+      amountKurus: p.amountKurus,
+    }));
+    const balances = computeNetBalances(memberIds, expensesForBalance, paymentsForBalance);
+    const checklist = simplifyDebts(balances);
+
+    const match = checklist.find(
+      (c) => c.from_user === req.userId && c.to_user === to_user && c.amount_kurus === amount_kurus,
+    );
+    if (!match) {
+      res.status(400).json({ error: 'Payment does not match the current checklist' });
+      return;
+    }
+
+    // 6. Double-send protection
+    const existing = await prisma.payment.findFirst({
+      where: {
+        groupId,
+        fromUser: req.userId!,
+        toUser: to_user,
+        status: 'PENDING_CONFIRMATION',
+      },
+    });
+    if (existing) {
+      res.status(409).json({ error: 'A pending payment already exists for this pair' });
+      return;
+    }
+
+    // 7. Create payment + notification in transaction (with race‑condition backstop)
+    try {
+      const payment = await prisma.$transaction(async (tx) => {
+        const payment = await tx.payment.create({
+          data: {
+            groupId,
+            fromUser: req.userId!,
+            toUser: to_user,
+            amountKurus: amount_kurus,
+            // status defaults to PENDING_CONFIRMATION
+          },
+        });
+
+        await tx.notification.create({
+          data: {
+            userId: to_user,
+            type: 'SETTLEMENT_CONFIRMATION_REQUEST',
+            relatedPaymentId: payment.id,
+          },
+        });
+
+        return payment;
+      });
+
+      res.status(201).json(formatPayment(payment));
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        res.status(409).json({ error: 'A pending payment already exists for this pair' });
+        return;
+      }
+      throw err; // let the outer catch handle it as a 500
+    }
+  } catch (error) {
+    console.error('POST /groups/:groupId/payments error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

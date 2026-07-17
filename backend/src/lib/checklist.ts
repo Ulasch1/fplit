@@ -3,10 +3,8 @@
 //   net_balance(U) =
 //     Σ(Expense.amountKurus where paidBy=U)
 //   − Σ(ExpenseSplit.shareAmountKurus where userId=U)
-//   + Σ(CONFIRMED Payment.amountKurus where to_user=U)    // M7: add here
-//   − Σ(CONFIRMED Payment.amountKurus where from_user=U)  // M7: add here
-//
-// In M6 the Payment table does not exist; the last two terms contribute 0.
+//   + Σ(CONFIRMED Payment.amountKurus where from_user=U)
+//   − Σ(CONFIRMED Payment.amountKurus where to_user=U)
 // ---------------------------------------------------------------------------
 
 export interface ExpenseForBalance {
@@ -15,25 +13,32 @@ export interface ExpenseForBalance {
   splits: { userId: string; shareAmountKurus: number }[];
 }
 
+export interface PaymentForBalance {
+  fromUser: string;
+  toUser: string;
+  amountKurus: number;
+}
+
 export interface ChecklistTransfer {
   from_user: string;   // debtor (user id)
   to_user: string;     // creditor (user id)
   amount_kurus: number;
-  pending_payment_id: string | null; // always null in M6 (Payment table arrives in M7)
+  pending_payment_id: string | null;
 }
 
 /**
  * Compute net balances for every member given the current ledger entries.
  *
- * Formula applied (M6 – only Expense + ExpenseSplit):
+ * Full formula:
  *   net_balance(U) = Σ(Expense.amountKurus where paidBy=U)
  *                  − Σ(ExpenseSplit.shareAmountKurus where userId=U)
- *
- * M7 will add the CONFIRMED Payment contributions.
+ *                  + Σ(CONFIRMED Payment.amountKurus where from_user=U)
+ *                  − Σ(CONFIRMED Payment.amountKurus where to_user=U)
  */
 export function computeNetBalances(
   memberIds: string[],
   expenses: ExpenseForBalance[],
+  payments: PaymentForBalance[] = [],
 ): Map<string, number> {
   const balances = new Map<string, number>();
 
@@ -52,26 +57,25 @@ export function computeNetBalances(
     }
   }
 
-  // M7: here you would add CONFIRMED payment contributions:
-  //   for each payment where to_user = U  →  balances.set(U, val + amount)
-  //   for each payment where from_user = U →  balances.set(U, val - amount)
+  // Confirmed payment contributions
+  for (const payment of payments) {
+    // payer settles debt -> balance rises toward 0
+    balances.set(payment.fromUser, (balances.get(payment.fromUser) ?? 0) + payment.amountKurus);
+    // receiver's claim reduced -> balance falls toward 0
+    balances.set(payment.toUser,   (balances.get(payment.toUser)   ?? 0) - payment.amountKurus);
+  }
 
   return balances;
 }
 
 /**
  * Greedy debt simplification producing a small (near-minimal) number of transfers
- * using a greedy heuristic.
- *
- * - Splits users into debtors (balance < 0) and creditors (balance > 0).
- * - Repeatedly picks the largest debtor and largest creditor, transfers
- *   min(|debt|, credit) between them, and reduces both balances.
- * - Continues until no debtors remain.
- *
- * Deterministic: ties are broken by userId for stable output.
- * Returns an empty array when everyone is settled (all balances 0).
+ * using a greedy heuristic, annotating pending payments where possible.
  */
-export function simplifyDebts(balances: Map<string, number>): ChecklistTransfer[] {
+export function simplifyDebts(
+  balances: Map<string, number>,
+  pendingPayments: { id: string; fromUser: string; toUser: string; amountKurus: number }[] = [],
+): ChecklistTransfer[] {
   let debtors: { userId: string; amount: number }[] = [];
   let creditors: { userId: string; amount: number }[] = [];
 
@@ -84,9 +88,10 @@ export function simplifyDebts(balances: Map<string, number>): ChecklistTransfer[
   }
 
   const transfers: ChecklistTransfer[] = [];
+  // shallow copy to track which pending payments we've already used
+  const available = [...pendingPayments];
 
   while (debtors.length > 0 && creditors.length > 0) {
-    // sort largest-first, break ties deterministically
     debtors.sort((a, b) => b.amount - a.amount || a.userId.localeCompare(b.userId));
     creditors.sort((a, b) => b.amount - a.amount || a.userId.localeCompare(b.userId));
 
@@ -94,11 +99,21 @@ export function simplifyDebts(balances: Map<string, number>): ChecklistTransfer[
     const creditor = creditors[0];
     const amount = Math.min(debtor.amount, creditor.amount);
 
+    // find a matching pending payment (first match)
+    const idx = available.findIndex(
+      (p) => p.fromUser === debtor.userId && p.toUser === creditor.userId && p.amountKurus === amount,
+    );
+    let pendingId: string | null = null;
+    if (idx !== -1) {
+      pendingId = available[idx].id;
+      available.splice(idx, 1); // each pending payment used at most once
+    }
+
     transfers.push({
       from_user: debtor.userId,
       to_user: creditor.userId,
       amount_kurus: amount,
-      pending_payment_id: null,
+      pending_payment_id: pendingId,
     });
 
     debtor.amount -= amount;

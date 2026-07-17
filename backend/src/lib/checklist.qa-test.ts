@@ -205,5 +205,89 @@ function assertTrue(cond: boolean, msg: string) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Scenario 7 (M7 regression): a CONFIRMED payment must SETTLE debt, not
+// double it. Bug that was fixed: net-balance computation applied the
+// confirmed payment with the wrong sign, so paying off a 5000 debt resulted
+// in a 10000 debt instead of 0.
+// A owes B 5000 (single expense: B pays 10000 split 5000/5000).
+// A pays B 5000 and it gets CONFIRMED -> balances must be exactly 0/0 and
+// the checklist must be empty (not doubled to 10000).
+// ---------------------------------------------------------------------------
+{
+  const A = 'A', B = 'B';
+  const members = [A, B];
+  const expenses: ExpenseForBalance[] = [
+    {
+      paidBy: B,
+      amountKurus: 10000,
+      splits: [
+        { userId: A, shareAmountKurus: 5000 },
+        { userId: B, shareAmountKurus: 5000 },
+      ],
+    },
+  ];
+
+  // Sanity: before any payment, A owes B 5000
+  const balancesBefore = computeNetBalances(members, expenses);
+  assertEqual(balancesBefore.get(A), -5000, 'Scenario7: before payment, A balance = -5000');
+  assertEqual(balancesBefore.get(B), 5000, 'Scenario7: before payment, B balance = +5000');
+
+  const balancesAfter = computeNetBalances(members, expenses, [
+    { fromUser: A, toUser: B, amountKurus: 5000 },
+  ]);
+  assertEqual(balancesAfter.get(A), 0, 'Scenario7 (regression): after CONFIRMED payment, A balance = 0 (not -10000)');
+  assertEqual(balancesAfter.get(B), 0, 'Scenario7 (regression): after CONFIRMED payment, B balance = 0 (not +10000)');
+
+  const checklistAfter = simplifyDebts(balancesAfter);
+  assertEqual(checklistAfter, [], 'Scenario7 (regression): checklist is EMPTY after fully-settling confirmed payment');
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 8 (M7 regression): partial settlement across a multi-debt group.
+// C is owed 3000 by both A and B. A settles fully; B's debt must remain
+// untouched (group would stay ACTIVE), then B settles and everything is 0.
+// ---------------------------------------------------------------------------
+{
+  const A = 'A', B = 'B', C = 'C';
+  const members = [A, B, C];
+  const expenses: ExpenseForBalance[] = [
+    {
+      paidBy: C,
+      amountKurus: 9000,
+      splits: [
+        { userId: A, shareAmountKurus: 3000 },
+        { userId: B, shareAmountKurus: 3000 },
+        { userId: C, shareAmountKurus: 3000 },
+      ],
+    },
+  ];
+
+  // Only A's payment confirmed so far
+  const balancesPartial = computeNetBalances(members, expenses, [
+    { fromUser: A, toUser: C, amountKurus: 3000 },
+  ]);
+  assertEqual(balancesPartial.get(A), 0, 'Scenario8: after A settles, A balance = 0');
+  assertEqual(balancesPartial.get(B), -3000, 'Scenario8: B balance still -3000 (untouched)');
+  assertEqual(balancesPartial.get(C), 3000, 'Scenario8: C balance still +3000 (not yet fully settled)');
+  const checklistPartial = simplifyDebts(balancesPartial);
+  assertEqual(
+    checklistPartial,
+    [{ from_user: B, to_user: C, amount_kurus: 3000, pending_payment_id: null }],
+    'Scenario8: checklist shows only remaining B->C 3000 debt (group should stay ACTIVE)',
+  );
+
+  // Both A and B's payments confirmed
+  const balancesFull = computeNetBalances(members, expenses, [
+    { fromUser: A, toUser: C, amountKurus: 3000 },
+    { fromUser: B, toUser: C, amountKurus: 3000 },
+  ]);
+  assertEqual(balancesFull.get(A), 0, 'Scenario8: after both settle, A balance = 0');
+  assertEqual(balancesFull.get(B), 0, 'Scenario8: after both settle, B balance = 0');
+  assertEqual(balancesFull.get(C), 0, 'Scenario8: after both settle, C balance = 0');
+  const checklistFull = simplifyDebts(balancesFull);
+  assertEqual(checklistFull, [], 'Scenario8 (regression): checklist EMPTY once all debts confirmed-settled (group should CLOSE)');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

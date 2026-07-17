@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 body {
-  background-color: #f0eee9; /* paper */
-  color: #22201d;            /* ink  */
+  background-color: #f0eee9;
+  color: #22201d;
+  font-family: var(--font-kalam), cursive;
 }

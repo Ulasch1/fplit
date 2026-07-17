@@ -71,3 +71,34 @@ export interface Group {
   status: 'ACTIVE' | 'CLOSED';
   created_at: string;
 }
+
+export type RejectionReason = 'FORGOT' | 'WRONG_AMOUNT' | 'OTHER';
+
+export type PaymentStatus = 'PENDING_CONFIRMATION' | 'CONFIRMED' | 'REJECTED';
+
+export interface Payment {
+  id: string;
+  group_id: string;
+  from_user: string;
+  to_user: string;
+  amount_kurus: number;
+  status: PaymentStatus;
+  created_at: string;
+  confirmed_at: string | null;
+  rejection_reason: RejectionReason | null;
+  rejection_note: string | null;
+}
+
+export interface NotificationItem {
+  id: string;
+  type: string; // currently only 'SETTLEMENT_CONFIRMATION_REQUEST'
+  related_payment_id: string;
+  is_read: boolean;
+  created_at: string;
+  payment: Payment;
+}
+
+export interface NotificationsResponse {
+  notifications: NotificationItem[];
+  unread_count: number;
+}

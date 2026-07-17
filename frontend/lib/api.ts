@@ -5,7 +5,10 @@ import type {
   GroupDetail,
   InviteLinkResponse,
   Expense,
-  ChecklistTransfer
+  ChecklistTransfer,
+  Payment,
+  RejectionReason,
+  NotificationsResponse
 } from '@/lib/types';
 import { getToken } from '@/lib/auth';
 
@@ -147,4 +150,34 @@ export function getChecklist(
   groupId: string
 ): Promise<ChecklistTransfer[]> {
   return apiFetch<ChecklistTransfer[]>(`/groups/${groupId}/checklist`);
+}
+
+export function createPayment(groupId: string, to_user: string, amount_kurus: number): Promise<Payment> {
+  return apiFetch<Payment>(`/groups/${groupId}/payments`, {
+    method: 'POST',
+    body: { to_user, amount_kurus }
+  });
+}
+
+export function resolvePayment(
+  paymentId: string,
+  action: 'CONFIRM' | 'REJECT',
+  rejection_reason?: RejectionReason,
+  rejection_note?: string
+): Promise<Payment> {
+  const body: any = action === 'CONFIRM'
+    ? { action }
+    : { action, rejection_reason, ...(rejection_note ? { rejection_note } : {}) };
+  return apiFetch<Payment>(`/payments/${paymentId}`, {
+    method: 'PATCH',
+    body
+  });
+}
+
+export function listNotifications(): Promise<NotificationsResponse> {
+  return apiFetch<NotificationsResponse>(`/notifications`);
+}
+
+export function markNotificationRead(id: string): Promise<void> {
+  return apiFetch<void>(`/notifications/${id}/read`, { method: 'PATCH' });
 }

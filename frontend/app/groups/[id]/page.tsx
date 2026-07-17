@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import React from 'react';
-import { getGroup, createInviteLink, ApiError } from '@/lib/api';
+import { getGroup, createInviteLink, createPayment, ApiError } from '@/lib/api';
 import { getUser } from '@/lib/auth';
 import { formatMoney } from '@/lib/format';
 import type { GroupDetail as GroupDetailType } from '@/lib/types';
@@ -30,6 +30,8 @@ function GroupDetail({ id }: { id: string }) {
   const [generating, setGenerating] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [markingKeys, setMarkingKeys] = useState<Record<string, boolean>>({});
+  const [markErrors, setMarkErrors] = useState<Record<string, string>>({});
 
   const load = async () => {
     setError(null);
@@ -186,26 +188,69 @@ function GroupDetail({ id }: { id: string }) {
               <p className="text-inkMuted">All settled up.</p>
             ) : (
               <div className="flex flex-col gap-0">
-                {group.checklist.map((t, idx) => (
-                  <React.Fragment key={`${t.from_user}-${t.to_user}-${t.amount_kurus}`}>
-                    <div className="flex items-center justify-between py-2">
-                      <div>
-                        <span className="font-mono text-sm">
-                          {cap(nameOf(t.from_user))} → {nameOf(t.to_user)}
-                        </span>
-                        {t.pending_payment_id !== null && (
-                          <span className="ml-2 font-mono uppercase text-[10px] text-inkMuted">
-                            awaiting confirmation
+                {group.checklist.map((t, idx) => {
+                  const rowKey = `${t.from_user}-${t.to_user}`;
+                  const isMarking = markingKeys[rowKey] === true;
+                  const showMark =
+                    group.status === 'ACTIVE' &&
+                    t.from_user === myId &&
+                    t.pending_payment_id === null;
+
+                  const handleMark = async () => {
+                    setMarkingKeys((prev) => ({ ...prev, [rowKey]: true }));
+                    setMarkErrors((prev) => ({ ...prev, [rowKey]: '' }));
+                    try {
+                      await createPayment(id, t.to_user, t.amount_kurus);
+                      await load();
+                    } catch (err: unknown) {
+                      const msg =
+                        err instanceof ApiError
+                          ? err.message
+                          : 'Could not mark as paid';
+                      setMarkErrors((prev) => ({ ...prev, [rowKey]: msg }));
+                    } finally {
+                      setMarkingKeys((prev) => ({ ...prev, [rowKey]: false }));
+                    }
+                  };
+
+                  return (
+                    <React.Fragment
+                      key={`${t.from_user}-${t.to_user}-${t.amount_kurus}`}
+                    >
+                      <div className="flex items-center justify-between py-2">
+                        <div>
+                          <span className="font-mono text-sm">
+                            {cap(nameOf(t.from_user))} → {nameOf(t.to_user)}
                           </span>
-                        )}
+                          {t.pending_payment_id !== null && (
+                            <span className="ml-2 font-mono uppercase text-[10px] text-inkMuted">
+                              awaiting confirmation
+                            </span>
+                          )}
+                        </div>
+                        <span className="font-mono">{formatMoney(t.amount_kurus)}</span>
                       </div>
-                      <span className="font-mono">{formatMoney(t.amount_kurus)}</span>
-                    </div>
-                    {idx < group.checklist.length - 1 && (
-                      <div className="border-b-[3px] border-divider" />
-                    )}
-                  </React.Fragment>
-                ))}
+
+                      {showMark && (
+                        <div className="pb-2">
+                          <Button disabled={isMarking} onClick={handleMark}>
+                            {isMarking ? 'Marking…' : 'Mark as paid'}
+                          </Button>
+                        </div>
+                      )}
+
+                      {markErrors[rowKey] && (
+                        <p className="text-debtor font-mono text-xs pb-2">
+                          {markErrors[rowKey]}
+                        </p>
+                      )}
+
+                      {idx < group.checklist.length - 1 && (
+                        <div className="border-b-[3px] border-divider" />
+                      )}
+                    </React.Fragment>
+                  );
+                })}
               </div>
             )}
           </>

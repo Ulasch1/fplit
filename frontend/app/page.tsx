@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { listGroups, createGroup, ApiError } from '@/lib/api';
+import { listGroups, createGroup, listNotifications, ApiError } from '@/lib/api';
 import { clearSession } from '@/lib/auth';
 import RequireAuth from '@/components/RequireAuth';
 import Button from '@/components/Button';
@@ -19,6 +19,7 @@ function Home() {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [creating, setCreating] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
   const [createError, setCreateError] = useState<string | null>(null);
 
   const loadGroups = useCallback(async () => {
@@ -35,6 +36,33 @@ function Home() {
   useEffect(() => {
     loadGroups();
   }, [loadGroups]);
+
+  const fetchUnread = useCallback(async () => {
+    try {
+      const { unread_count } = await listNotifications();
+      setUnreadCount(unread_count);
+    } catch {
+      // silently ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchUnread();
+    const handleFocus = () => {
+      fetchUnread();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        fetchUnread();
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [fetchUnread]);
 
   const handleLogout = () => {
     clearSession();
@@ -65,9 +93,18 @@ function Home() {
     <div className="min-h-screen bg-paper">
       <header className="sticky top-0 flex justify-between items-center px-4 py-3 border-b-[3px] border-ink bg-paper">
         <span className="font-kalam text-2xl font-bold text-ink">Fplit</span>
-        <Button variant="link" onClick={handleLogout}>
-          Log out
-        </Button>
+        <div className="flex items-center gap-3">
+          <Link
+            href="/notifications"
+            aria-label="Notifications"
+            className="font-mono text-sm text-ink hover:underline underline-offset-4"
+          >
+            🔔 {unreadCount > 0 && <span>{unreadCount}</span>}
+          </Link>
+          <Button variant="link" onClick={handleLogout}>
+            Log out
+          </Button>
+        </div>
       </header>
 
       <main className="max-w-md mx-auto p-4 flex flex-col gap-4">

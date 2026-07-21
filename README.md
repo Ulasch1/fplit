@@ -13,8 +13,10 @@ Fplit is a group expense-splitting application that tracks who owes whom, comput
 
 ## Repo layout
 
-- `backend/`: Node.js + Express + TypeScript + Prisma (PostgreSQL). See [backend/ARCHITECTURE.md](backend/ARCHITECTURE.md) for the architecture and full API reference.
+- `backend/`: Node.js + Express + TypeScript + Prisma (PostgreSQL)
 - `frontend/`: Next.js (App Router) + TypeScript + Tailwind CSS
+
+See [backend/ARCHITECTURE.md](backend/ARCHITECTURE.md) for the full architecture writeup: tech decisions and rationale, data model, the settlement algorithm, edge cases, and the API reference (covers both backend and frontend).
 
 ## Tech stack
 

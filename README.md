@@ -2,9 +2,18 @@
 
 Fplit is a group expense-splitting application that tracks who owes whom, computes net balances, and simplifies debts to a minimum number of transfers. It includes a two-sided confirmation flow when settling up, so both payer and payee must confirm the payment.
 
+## Features
+
+- Email/password auth (JWT)
+- Create groups, invite members via shareable link
+- Add expenses, split live across the group's current membership (not frozen at creation time)
+- Checklist view: net balances and simplified debt transfers (minimum number of payments)
+- Two-sided payment confirmation (payer marks paid, payee confirms or rejects) with notifications
+- Groups auto-close once every balance nets to zero
+
 ## Repo layout
 
-- `backend/`: Node.js + Express + TypeScript + Prisma (PostgreSQL)
+- `backend/`: Node.js + Express + TypeScript + Prisma (PostgreSQL). See [backend/ARCHITECTURE.md](backend/ARCHITECTURE.md) for the architecture and full API reference.
 - `frontend/`: Next.js (App Router) + TypeScript + Tailwind CSS
 
 ## Tech stack
@@ -15,7 +24,6 @@ Fplit is a group expense-splitting application that tracks who owes whom, comput
 | Backend      | Node.js, Express, TypeScript, Prisma      | Railway          |
 | Database     | PostgreSQL                                | Railway (plugin) |
 
-For detailed design decisions see the vault documents: `kapsam.md`, `milestone-plani.md`, etc.
 
 ## Local development
 
@@ -67,7 +75,7 @@ Set `NEXT_PUBLIC_API_URL=http://localhost:4000` (already provided in `.env.local
 
 4. Build command: `npm run build`
 5. Start command: `npm start`
-6. Prisma migrations are not yet present (M1); migration workflow will be added in M2.
+6. Run `npx prisma migrate deploy` (or set it as a Railway deploy step) to apply migrations against the production database.
 
 ### Frontend → Vercel
 
@@ -94,5 +102,13 @@ Set `NEXT_PUBLIC_API_URL=http://localhost:4000` (already provided in `.env.local
 
 ## Milestone status
 
-- **M1: done.** Skeleton + health check + database connection. Live on Vercel + Railway.
+- **M1: done.** Skeleton + health check + database connection. Deploy-ready, not yet actually deployed (no Railway/Vercel project set up).
 - **M2: done.** Auth: register, login, JWT middleware.
+- **M3: done.** Group CRUD + ownership transfer.
+- **M4: done.** Invite link flow.
+- **M5: done.** Expenses + splitting.
+- **M6: done.** Checklist computation (net balances + debt simplification).
+- **M7: done.** Payments, two-sided confirmation, notifications, group auto-close.
+- **M8: done.** Frontend: auth, home, group detail, expense creation screens.
+- **M9: done.** Frontend: checklist interaction (mark as paid) + notifications.
+- **M10: remaining.** Polish + edge-case pass, final README, live deploy.

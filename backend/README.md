@@ -1,6 +1,9 @@
 # Fplit Backend
 
-Express + TypeScript + Prisma skeleton for the Fplit expense-splitting app.
+Express + TypeScript + Prisma REST API for the Fplit expense-splitting app:
+auth, groups, invite links, expenses, checklist/settlement, payments, and
+notifications. See [ARCHITECTURE.md](ARCHITECTURE.md) for design decisions,
+data model, and the full API reference.
 
 ## Local setup
 
